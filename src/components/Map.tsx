@@ -7,10 +7,10 @@ import type { AnimalLocation } from '@/types'
 const NEW_DELHI: [number, number] = [28.6139, 77.2090];
 
 const HEATMAP_COLORS = [
-  { threshold: 0, color: 'rgba(0, 255, 0, 0.4)' },    // Green (Low)
-  { threshold: 3, color: 'rgba(255, 255, 0, 0.4)' },  // Yellow (Medium)
-  { threshold: 5, color: 'rgba(255, 165, 0, 0.4)' },  // Orange (High)
-  { threshold: 7, color: 'rgba(255, 0, 0, 0.4)' },    // Red (Very High)
+  { threshold: 0, color: 'rgba(0, 255, 0, 1)' },    // Green (Low)
+  { threshold: 3, color: 'rgba(255, 255, 0, 1)' },  // Yellow (Medium)
+  { threshold: 5, color: 'rgba(255, 165, 0, 1)' },  // Orange (High)
+  { threshold: 7, color: 'rgba(255, 0, 0, 1)' },    // Red (Very High)
 ];
 
 const getHeatmapColor = (value: number): string => {
@@ -35,59 +35,94 @@ const drawHeatmap = (
   canvasRef: React.RefObject<HTMLCanvasElement>,
   width: number, 
   height: number, 
-  bounds: { project: (coords: [number, number]) => [number, number] },
+  bounds: {
+    ne: [number, number],
+    sw: [number, number],
+    center: [number, number],
+  },
   animalLocations: AnimalLocation[]
 ) => {
   const ctx = canvasRef.current?.getContext('2d');
   if (!ctx) return;
 
+  // Set canvas size to match map container size
+  canvasRef.current!.width = width;
+  canvasRef.current!.height = height;
+  
   // Clear previous drawing
   ctx.clearRect(0, 0, width, height);
 
-  // Set canvas size to match map
-  canvasRef.current!.width = width;
-  canvasRef.current!.height = height;
-
-  // Create grid cells (50x50 pixels each)
-  const cellSize = 50;
+  // Create grid cells (larger squares)
+  const cellSize = 60; // 3x size
   const cols = Math.ceil(width / cellSize);
   const rows = Math.ceil(height / cellSize);
   const grid: number[][] = Array(rows).fill(0).map(() => Array(cols).fill(0));
 
+  // Calculate conversion factors
+  const latRange = bounds.ne[0] - bounds.sw[0];
+  const lngRange = bounds.ne[1] - bounds.sw[1];
+
   // Count animals in each grid cell
   animalLocations.forEach(location => {
-    const pixel = bounds.project(
-      [location.latitude, location.longitude]
-    );
+    try {
+      // Convert lat/lng to pixel coordinates
+      const x = ((location.longitude - bounds.sw[1]) / lngRange) * width;
+      const y = height - ((location.latitude - bounds.sw[0]) / latRange) * height;
+      
+      // Center the cell by offsetting by half the cell size
+      const col = Math.floor((x - cellSize/2) / cellSize);
+      const row = Math.floor((y - cellSize/2) / cellSize);
 
-    const col = Math.floor(pixel[0] / cellSize);
-    const row = Math.floor(pixel[1] / cellSize);
-
-    if (row >= 0 && row < rows && col >= 0 && col < cols) {
-      grid[row][col]++;
+      if (row >= 0 && row < rows && col >= 0 && col < cols) {
+        grid[row][col]++;
+      }
+    } catch (error) {
+      console.error('Error projecting coordinates:', error);
     }
   });
 
-  // Draw heatmap
+  // Draw heatmap with alpha blending
+  ctx.globalAlpha = 0.5;
   grid.forEach((row, rowIndex) => {
     row.forEach((count, colIndex) => {
       if (count > 0) {
         ctx.fillStyle = getHeatmapColor(count);
+        // Draw the square centered on the point
         ctx.fillRect(
-          colIndex * cellSize,
-          rowIndex * cellSize,
+          colIndex * cellSize + cellSize/2,  // Add half cell size to center
+          rowIndex * cellSize + cellSize/2,  // Add half cell size to center
           cellSize,
           cellSize
         );
       }
     });
   });
+  ctx.globalAlpha = 1.0;
+};
+
+const getOffsetCoordinates = (
+  latitude: number,
+  longitude: number,
+  zoom: number
+): [number, number] => {
+  // Only apply offset at high zoom levels (zoom > 16)
+  if (zoom <= 16) {
+    return [latitude, longitude];
+  }
+  
+  // Add a small random offset (about 5-10 meters)
+  const offset = 0.0002 * (Math.random() - 0.5);
+  return [
+    latitude + offset,
+    longitude + offset
+  ];
 };
 
 export default function MapComponent() {
   const [animalLocations, setAnimalLocations] = useState<AnimalLocation[]>([]);
   const [center, setCenter] = useState<[number, number]>(NEW_DELHI);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  const [zoom, setZoom] = useState(15);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -136,8 +171,9 @@ export default function MapComponent() {
         height={720} 
         width={1280} 
         center={center}
-        zoom={15}
+        zoom={zoom}
         onBoundsChanged={({ bounds, center, zoom }) => {
+          setZoom(zoom);
           const canvas = canvasRef.current;
           if (canvas) {
             drawHeatmap(canvasRef, canvas.width, canvas.height, bounds as any, animalLocations);
@@ -145,15 +181,25 @@ export default function MapComponent() {
         }}
       >
         {/* Heatmap Canvas Layer */}
-        <canvas
-          ref={canvasRef}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            pointerEvents: 'none',
-          }}
-        />
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 1,  // Above map tiles but below markers
+          pointerEvents: 'none'
+        }}>
+          <canvas
+            ref={canvasRef}
+            width={1280}
+            height={720}
+            style={{
+              width: '100%',
+              height: '100%'
+            }}
+          />
+        </div>
 
         {/* User Location Marker */}
         {userLocation && (
@@ -161,29 +207,37 @@ export default function MapComponent() {
             <div style={{ 
               fontSize: '2rem',
               filter: 'drop-shadow(2px 2px 2px rgba(0,0,0,0.3))',
-              zIndex: 1000
+              zIndex: 2  // Above heatmap
             }}>
               👩🏻‍🏭
             </div>
           </Marker>
         )}
 
-        {/* Emoji Markers Layer */}
-        {animalLocations.map((location, index) => (
-          <Marker
-            key={index}
-            width={50}
-            anchor={[location.latitude, location.longitude]}
-          >
-            <div style={{ 
-              fontSize: '2rem',
-              filter: 'drop-shadow(2px 2px 2px rgba(0,0,0,0.3))',  // Add shadow for better visibility
-              zIndex: 1000  // Ensure emojis stay on top
-            }}>
-              {getAnimalEmoji(location.animalType)}
-            </div>
-          </Marker>
-        ))}
+        {/* Animal Markers Layer */}
+        {animalLocations.map((location, index) => {
+          const [offsetLat, offsetLng] = getOffsetCoordinates(
+            location.latitude,
+            location.longitude,
+            zoom
+          );
+          
+          return (
+            <Marker
+              key={index}
+              width={50}
+              anchor={[offsetLat, offsetLng]}
+            >
+              <div style={{ 
+                fontSize: '2rem',
+                filter: 'drop-shadow(2px 2px 2px rgba(0,0,0,0.3))',
+                zIndex: 2  // Above heatmap
+              }}>
+                {getAnimalEmoji(location.animalType)}
+              </div>
+            </Marker>
+          );
+        })}
 
         <ZoomControl />
       </Map>
